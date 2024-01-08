@@ -5,12 +5,29 @@ const gravatar = require("gravatar");
 const path = require("path");
 const fs = require("fs/promises");
 const jimp = require("jimp");
+const nodemailer = require("nodemailer");
+const { nanoid } = require("nanoid");
 
 require("dotenv").configDotenv();
 
 const { ctrlWrapper, HttpError } = require("../helpers");
 
-const { SECRET_KEY } = process.env;
+const { SECRET_KEY, META_PASSWORD, BASE_URL } = process.env;
+
+// ----------------------------Email
+
+// Створюємо об'єкт налаштувань
+const nodemailerConfig = {
+  host: "smtp.meta.ua",
+  port: 465,
+  secure: true,
+  auth: {
+    user: "kh_andrew16@meta.ua",
+    pass: META_PASSWORD,
+  },
+};
+// Створюємо транспорт
+const transport = nodemailer.createTransport(nodemailerConfig);
 
 // Шлях до папки з аватарками
 const avatarsDir = path.join(__dirname, "../", "public", "avatars");
@@ -28,18 +45,72 @@ const register = async (req, res) => {
   const hashPassword = await bcrypt.hash(password, 10);
   // Генеруємо аватарку тимчасову
   const avatarURL = gravatar.url(email);
+  // Створюємо верифікаційний код
+  const verificationToken = nanoid();
 
   const newUser = await User.create({
     email,
     password: hashPassword,
     subscription,
     avatarURL,
+    verificationToken,
   });
+
+  // Створюємо об'єкт емейл
+  const verifyEmail = {
+    to: email,
+    from: "kh_andrew16@meta.ua",
+    subject: "Test email",
+    Html: `<a target = "_blank" href="${BASE_URL}/users/verify/${verificationToken}">Click verify email</a>`,
+  };
+
+  // Відправка пошти (в реєстрації)
+  await transport.sendMail(verifyEmail);
+
   res.status(201).json({
     user: {
       email,
       subscription: newUser.subscription,
     },
+  });
+};
+
+// Контролер верифікації емейла
+const verifyEmail = async (req, res) => {
+  const { verificationToken } = req.params;
+  const user = await User.findOne({ verificationToken });
+  if (!user) {
+    throw HttpError(404, "User not found");
+  }
+  await User.findByIdAndUpdate(user._id, {
+    verify: true,
+    verificationToken: "",
+  });
+  res.status(200).json({
+    message: "Verification successful",
+  });
+};
+
+// Контролер для підтвердження емейла
+const resendVerifyEmail = async (req, res) => {
+  const { email } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw HttpError(400, "Email not found");
+  }
+  if (user.verify) {
+    throw HttpError(400, "Verification has already been passed");
+  }
+  const verifyEmail = {
+    to: email,
+    from: "kh_andrew16@meta.ua",
+    subject: "Test email",
+    Html: `<a target = "_blank" href="${BASE_URL}/users/verify/${user.verificationToken}">Click verify email</a>`,
+  };
+
+  await transport.sendMail(verifyEmail);
+  res.status(200).json({
+    message: "Verification email sent",
   });
 };
 
@@ -51,6 +122,11 @@ const login = async (req, res) => {
   if (!user) {
     throw HttpError(401, "Email or password is wrong");
   }
+  //  Перевірка верифікації користувача
+  if (user.verify) {
+    throw HttpError(400, "Verification has already been passed");
+  }
+
   // Якщо такий користувач вже існує, то перевіряємо паролі
   const passwordCompare = await bcrypt.compare(password, user.password);
   if (!passwordCompare) {
@@ -129,4 +205,6 @@ module.exports = {
   getCurrent: ctrlWrapper(getCurrent),
   logout: ctrlWrapper(logout),
   updateAvatar: ctrlWrapper(updateAvatar),
+  verifyEmail: ctrlWrapper(verifyEmail),
+  resendVerifyEmail: ctrlWrapper(resendVerifyEmail),
 };
